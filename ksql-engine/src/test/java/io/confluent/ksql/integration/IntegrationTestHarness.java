@@ -1,6 +1,33 @@
 package io.confluent.ksql.integration;
 
 
+import org.apache.kafka.clients.consumer.ConsumerConfig;
+import org.apache.kafka.clients.consumer.ConsumerRecord;
+import org.apache.kafka.clients.consumer.KafkaConsumer;
+import org.apache.kafka.clients.producer.KafkaProducer;
+import org.apache.kafka.clients.producer.ProducerConfig;
+import org.apache.kafka.clients.producer.ProducerRecord;
+import org.apache.kafka.clients.producer.RecordMetadata;
+import org.apache.kafka.common.serialization.ByteArrayDeserializer;
+import org.apache.kafka.common.serialization.Deserializer;
+import org.apache.kafka.common.serialization.Serializer;
+import org.apache.kafka.common.serialization.StringDeserializer;
+import org.apache.kafka.common.serialization.StringSerializer;
+import org.apache.kafka.connect.data.Schema;
+import org.apache.kafka.streams.StreamsConfig;
+import org.apache.kafka.test.TestUtils;
+
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Properties;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
+
 import io.confluent.kafka.schemaregistry.client.MockSchemaRegistryClient;
 import io.confluent.kafka.schemaregistry.client.SchemaRegistryClient;
 import io.confluent.ksql.GenericRow;
@@ -12,64 +39,41 @@ import io.confluent.ksql.serde.delimited.KsqlDelimitedSerializer;
 import io.confluent.ksql.serde.json.KsqlJsonDeserializer;
 import io.confluent.ksql.serde.json.KsqlJsonSerializer;
 import io.confluent.ksql.testutils.EmbeddedSingleNodeKafkaCluster;
-import io.confluent.ksql.util.*;
-
-import org.apache.kafka.clients.admin.AdminClient;
-import org.apache.kafka.clients.consumer.ConsumerConfig;
-import org.apache.kafka.clients.consumer.ConsumerRecord;
-import org.apache.kafka.clients.consumer.KafkaConsumer;
-import org.apache.kafka.clients.producer.KafkaProducer;
-import org.apache.kafka.clients.producer.ProducerConfig;
-import org.apache.kafka.clients.producer.ProducerRecord;
-import org.apache.kafka.clients.producer.RecordMetadata;
-import org.apache.kafka.common.serialization.Deserializer;
-import org.apache.kafka.common.serialization.Serializer;
-import org.apache.kafka.common.serialization.StringSerializer;
-import org.apache.kafka.connect.data.Schema;
-import org.apache.kafka.streams.StreamsConfig;
-import org.apache.kafka.test.TestUtils;
-
-import java.util.Collections;
-import java.util.HashMap;
-import java.util.Map;
-import java.util.Properties;
-import java.util.concurrent.ExecutionException;
-import java.util.concurrent.Future;
-import java.util.concurrent.TimeUnit;
-import java.util.concurrent.TimeoutException;
+import io.confluent.ksql.util.KafkaTopicClient;
+import io.confluent.ksql.util.KafkaTopicClientImpl;
+import io.confluent.ksql.util.KsqlConfig;
+import io.confluent.ksql.util.KsqlException;
+import io.confluent.ksql.util.TestDataProvider;
 
 
 public class IntegrationTestHarness {
 
-
-
   public static final long TEST_RECORD_FUTURE_TIMEOUT_MS = 5000;
-  public static final long RESULTS_POLL_MAX_TIME_MS = 30000;
+  public static final long RESULTS_POLL_MAX_TIME_MS = 60000;
   public static final long RESULTS_EXTRA_POLL_TIME_MS = 250;
 
   public static final String CONSUMER_GROUP_ID_PREFIX = "KSQL_Integration_Test_Consumer_";
 
   public KsqlConfig ksqlConfig;
-  KafkaTopicClientImpl topicClient;
-  private AdminClient adminClient;
+  private KafkaTopicClientImpl topicClient;
 
   public SchemaRegistryClient schemaRegistryClient;
-
-  private TopicConsumer topicConsumer;
 
   public IntegrationTestHarness() {
     this.schemaRegistryClient = new MockSchemaRegistryClient();
   }
 
+  public KafkaTopicClient topicClient() {
+    return topicClient;
+  }
 
   // Topic generation
   public void createTopic(String topicName) {
-    topicClient.createTopic(topicName, 1, (short) 1);
+    createTopic(topicName, 1, (short) 1);
   }
   public void createTopic(String topicName, int numPartitions, short replicatonFactor) {
     topicClient.createTopic(topicName, numPartitions, replicatonFactor);
   }
-
 
   /**
    * Topic topicName will be automatically created if it doesn't exist.
@@ -147,8 +151,10 @@ public class IntegrationTestHarness {
                                             int expectedNumMessages,
                                             Deserializer<K> keyDeserializer,
                                             long resultsPollMaxTimeMs) {
+
     return consumeData(topic, schema, expectedNumMessages, keyDeserializer, resultsPollMaxTimeMs,
                  DataSource.DataSourceSerDe.JSON);
+
   }
 
   public <K> Map<K, GenericRow> consumeData(String topic,
@@ -162,12 +168,7 @@ public class IntegrationTestHarness {
 
     Map<K, GenericRow> result = new HashMap<>();
 
-    Properties consumerConfig = new Properties();
-    consumerConfig.put(ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG,
-                       ksqlConfig.get(ProducerConfig.BOOTSTRAP_SERVERS_CONFIG));
-    consumerConfig.put(ConsumerConfig.GROUP_ID_CONFIG,
-                       CONSUMER_GROUP_ID_PREFIX + System.currentTimeMillis());
-    consumerConfig.put(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, "earliest");
+    Properties consumerConfig = consumerConfig();
 
     try (KafkaConsumer<K, GenericRow> consumer
              = new KafkaConsumer<>(consumerConfig,
@@ -196,6 +197,46 @@ public class IntegrationTestHarness {
     return result;
   }
 
+  public List<ConsumerRecord> consumerRecords(final String topic,
+                                              final int expectedNumMessages,
+                                              final long resultsPollMaxTimeMs) {
+
+    final List<ConsumerRecord> results = new ArrayList<>();
+    try(final KafkaConsumer<String, byte[]> consumer = new KafkaConsumer<>(consumerConfig(),
+        new StringDeserializer(),
+        new ByteArrayDeserializer())) {
+      consumer.subscribe(Collections.singleton(topic.toUpperCase()));
+      long pollStart = System.currentTimeMillis();
+      long pollEnd = pollStart + resultsPollMaxTimeMs;
+      while (System.currentTimeMillis() < pollEnd &&
+          continueConsuming(results.size(), expectedNumMessages)) {
+        for (ConsumerRecord<String, byte[]> record :
+            consumer.poll(Math.max(1, pollEnd - System.currentTimeMillis()))) {
+          if (record.value() != null) {
+            results.add(record);
+          }
+        }
+      }
+
+      for (ConsumerRecord<String, byte[]> record : consumer.poll(RESULTS_EXTRA_POLL_TIME_MS)) {
+        if (record.value() != null) {
+          results.add(record);
+        }
+      }
+    }
+    return results;
+
+  }
+
+  private Properties consumerConfig() {
+    Properties consumerConfig = new Properties();
+    consumerConfig.put(ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG,
+                       ksqlConfig.get(ProducerConfig.BOOTSTRAP_SERVERS_CONFIG));
+    consumerConfig.put(ConsumerConfig.GROUP_ID_CONFIG,
+                       CONSUMER_GROUP_ID_PREFIX + System.currentTimeMillis());
+    consumerConfig.put(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, "earliest");
+    return consumerConfig;
+  }
   private static boolean continueConsuming(int messagesConsumed, int maxMessages) {
     return maxMessages < 0 || messagesConsumed < maxMessages;
   }
@@ -217,14 +258,11 @@ public class IntegrationTestHarness {
     configMap.put(StreamsConfig.STATE_DIR_CONFIG, TestUtils.tempDirectory().getPath());
 
     this.ksqlConfig = new KsqlConfig(configMap);
-    this.adminClient = AdminClient.create(ksqlConfig.getKsqlAdminClientConfigProps());
-    this.topicClient = new KafkaTopicClientImpl(adminClient);
-
+    this.topicClient = new KafkaTopicClientImpl(ksqlConfig.getKsqlAdminClientConfigProps());
   }
 
   public void stop() {
     this.topicClient.close();
-    this.adminClient.close();
     this.embeddedKafkaCluster.stop();
   }
 
@@ -232,6 +270,7 @@ public class IntegrationTestHarness {
                                                      TestDataProvider dataProvider,
                                                      Long timestamp)
       throws InterruptedException, ExecutionException, TimeoutException {
+
     return publishTestData(topicName, dataProvider, timestamp, DataSource.DataSourceSerDe.JSON);
   }
 
@@ -246,6 +285,7 @@ public class IntegrationTestHarness {
                        getSerializer(dataProvider.schema(),
                                      dataSourceSerDe),
                        timestamp);
+
   }
 
   private Serializer getSerializer(Schema schema, DataSource.DataSourceSerDe dataSourceSerDe) {

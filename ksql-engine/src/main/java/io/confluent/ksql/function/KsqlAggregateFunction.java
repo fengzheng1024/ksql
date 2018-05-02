@@ -21,73 +21,32 @@ import org.apache.kafka.streams.kstream.Merger;
 
 import java.util.List;
 import java.util.Map;
+import java.util.function.Supplier;
 
 import io.confluent.ksql.parser.tree.Expression;
-import io.confluent.ksql.util.KsqlException;
 
-public abstract class KsqlAggregateFunction<V, A> {
+public interface KsqlAggregateFunction<V, A> {
 
-  private final int argIndexInValue;
-  private final A intialValue;
-  private final Schema returnType;
-  private final List<Schema> arguments;
-  private final String functionName;
-  private final Class kudafClass;
-
-  public KsqlAggregateFunction(Integer argIndexInValue) {
-    this.argIndexInValue = argIndexInValue;
-    this.intialValue = null;
-    this.returnType = null;
-    this.arguments = null;
-    this.functionName = null;
-    this.kudafClass = null;
-  }
-
-  public KsqlAggregateFunction(
-      int argIndexInValue,
-      A intialValue,
-      Schema returnType,
-      List<Schema> arguments,
-      String functionName,
-      Class kudafClass
-  ) {
-    this.argIndexInValue = argIndexInValue;
-    this.intialValue = intialValue;
-    this.returnType = returnType;
-    this.arguments = arguments;
-    this.functionName = functionName;
-    this.kudafClass = kudafClass;
-  }
-
-  public abstract KsqlAggregateFunction<V, A> getInstance(
+  KsqlAggregateFunction<V, A> getInstance(
       final Map<String, Integer> expressionNames,
-      final List<Expression> functionArguments
-  );
+      final List<Expression> functionArguments);
 
-  public boolean hasSameArgTypes(List<Schema> argTypeList) {
-    if (argTypeList == null) {
-      throw new KsqlException("Argument type list is null.");
-    }
-    return this.arguments.equals(argTypeList);
-  }
+  boolean hasSameArgTypes(List<Schema> argTypeList);
 
-  public abstract A aggregate(V currentVal, A currentAggVal);
+  Supplier<A> getInitialValueSupplier();
 
-  public A getIntialValue() {
-    return intialValue;
-  }
+  int getArgIndexInValue();
 
-  public int getArgIndexInValue() {
-    return argIndexInValue;
-  }
+  Schema getReturnType();
 
-  public Schema getReturnType() {
-    return returnType;
-  }
+  /**
+   * Merges values inside the window.
+   * @return A - type of return value
+   */
+  A aggregate(V currentValue, A aggregateValue);
 
-  public List<Schema> getArguments() {
-    return arguments;
-  }
-
-  public abstract Merger<String, A> getMerger();
+  /**
+   * Merges two session windows together with the same merge key.
+   */
+  Merger<String, A> getMerger();
 }

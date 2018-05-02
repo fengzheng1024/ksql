@@ -34,6 +34,10 @@ public class GenericRow {
     this.columns = columns;
   }
 
+  public GenericRow(Object ...columns) {
+    this(Arrays.asList(columns));
+  }
+
   @Override
   public String toString() {
     StringBuilder stringBuilder = new StringBuilder("[ ");
@@ -63,11 +67,16 @@ public class GenericRow {
 
   @Override
   public boolean equals(Object o) {
-    if (this == o) return true;
-    if (o == null || getClass() != o.getClass()) return false;
+    if (this == o) {
+      return true;
+    }
+    if (o == null || getClass() != o.getClass()) {
+      return false;
+    }
     GenericRow that = (GenericRow) o;
-
-    if (columns.size() != that.columns.size()) return false;
+    if (columns.size() != that.columns.size()) {
+      return false;
+    }
 
     // For now string matching is used to compare the rows as double comparison will cause issues
     return this.toString().equals(that.toString());
@@ -82,4 +91,7 @@ public class GenericRow {
     return columns;
   }
 
+  public <T> T getColumnValue(int columnIndex) {
+    return (T) columns.get(columnIndex);
+  }
 }

@@ -21,11 +21,13 @@ import org.apache.kafka.common.serialization.Serdes;
 import org.apache.kafka.connect.data.Field;
 import org.apache.kafka.connect.data.Schema;
 import org.apache.kafka.streams.KeyValue;
+import org.apache.kafka.streams.kstream.KGroupedTable;
 import org.apache.kafka.streams.kstream.KStream;
 import org.apache.kafka.streams.kstream.KTable;
-import org.apache.kafka.streams.kstream.KeyValueMapper;
 import org.apache.kafka.streams.kstream.Produced;
+import org.apache.kafka.streams.kstream.Serialized;
 import org.apache.kafka.streams.kstream.Windowed;
+import org.apache.kafka.streams.kstream.WindowedSerdes;
 
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -38,13 +40,12 @@ import io.confluent.kafka.schemaregistry.client.SchemaRegistryClient;
 import io.confluent.ksql.GenericRow;
 import io.confluent.ksql.function.FunctionRegistry;
 import io.confluent.ksql.parser.tree.Expression;
-import io.confluent.ksql.serde.WindowedSerde;
 import io.confluent.ksql.util.Pair;
 
 public class SchemaKTable extends SchemaKStream {
 
 
-  private final KTable ktable;
+  private final KTable<?, GenericRow> ktable;
   private final boolean isWindowed;
 
   public SchemaKTable(
@@ -78,12 +79,13 @@ public class SchemaKTable extends SchemaKStream {
       Set<Integer> rowkeyIndexes
   ) {
     if (isWindowed) {
-      ktable.toStream()
-          .map(
-              (KeyValueMapper<Windowed<String>, GenericRow, KeyValue<Windowed<String>,
-                  GenericRow>>) (key, row) -> {
+      final Serde<Windowed<String>> windowedSerde
+              = WindowedSerdes.timeWindowedSerdeFrom(String.class);
+      ((KTable<Windowed<String>, GenericRow>)ktable).toStream()
+          .mapValues(
+              row -> {
                 if (row == null) {
-                  return new KeyValue<>(key, null);
+                  return null;
                 }
                 List columns = new ArrayList();
                 for (int i = 0; i < row.getColumns().size(); i++) {
@@ -91,14 +93,14 @@ public class SchemaKTable extends SchemaKStream {
                     columns.add(row.getColumns().get(i));
                   }
                 }
-                return new KeyValue<>(key, new GenericRow(columns));
+                return new GenericRow(columns);
               }
-          ).to(kafkaTopicName, Produced.with(new WindowedSerde(), topicValueSerDe));
+          ).to(kafkaTopicName, Produced.with(windowedSerde, topicValueSerDe));
     } else {
-      ktable.toStream()
-          .map((KeyValueMapper<String, GenericRow, KeyValue<String, GenericRow>>) (key, row) -> {
+      ((KTable<String, GenericRow>)ktable).toStream()
+          .mapValues(row -> {
             if (row == null) {
-              return new KeyValue<>(key, null);
+              return null;
             }
             List columns = new ArrayList();
             for (int i = 0; i < row.getColumns().size(); i++) {
@@ -106,7 +108,7 @@ public class SchemaKTable extends SchemaKStream {
                 columns.add(row.getColumns().get(i));
               }
             }
-            return new KeyValue<>(key, new GenericRow(columns));
+            return new GenericRow(columns);
           }).to(kafkaTopicName, Produced.with(Serdes.String(), topicValueSerDe));
     }
 
@@ -143,16 +145,11 @@ public class SchemaKTable extends SchemaKStream {
   @SuppressWarnings("unchecked")
   @Override
   public SchemaKTable select(final List<Pair<String, Expression>> expressionPairList) {
-
-    final Pair<Schema, SelectValueMapper> schemaAndMapper
-        = createSelectValueMapperAndSchema(expressionPairList);
-
-    KTable projectedKTable = ktable.mapValues(schemaAndMapper.right);
-
+    Selection selection = new Selection(expressionPairList, functionRegistry, this);
     return new SchemaKTable(
-        schemaAndMapper.left,
-        projectedKTable,
-        keyField,
+        selection.getSchema(),
+        ktable.mapValues(selection.getSelectValueMapper()),
+        selection.getKey(),
         Collections.singletonList(this),
         isWindowed,
         Type.PROJECT,
@@ -174,4 +171,26 @@ public class SchemaKTable extends SchemaKStream {
     return isWindowed;
   }
 
+  @Override
+  public SchemaKGroupedStream groupBy(
+      final Serde<String> keySerde,
+      final Serde<GenericRow> valSerde,
+      final List<Expression> groupByExpressions) {
+    final String aggregateKeyName = keyNameForGroupBy(groupByExpressions);
+    final List<Integer> newKeyIndexes = keyIndexesForGroupBy(getSchema(), groupByExpressions);
+
+    final KGroupedTable kgroupedTable = ktable.filter((key, value) -> value != null).groupBy(
+        (key, value) ->
+            new KeyValue<>(buildGroupByKey(newKeyIndexes, value), value),
+        Serialized.with(keySerde, valSerde));
+
+    final Field newKeyField = new Field(aggregateKeyName, -1, Schema.STRING_SCHEMA);
+    return new SchemaKGroupedTable(
+        schema,
+        kgroupedTable,
+        newKeyField,
+        Collections.singletonList(this),
+        functionRegistry,
+        schemaRegistryClient);
+  }
 }

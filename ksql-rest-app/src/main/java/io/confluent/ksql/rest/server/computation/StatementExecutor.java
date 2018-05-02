@@ -16,6 +16,7 @@
 
 package io.confluent.ksql.rest.server.computation;
 
+import io.confluent.ksql.util.KsqlConstants;
 import org.apache.kafka.common.errors.WakeupException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -27,12 +28,11 @@ import java.util.Optional;
 import java.util.concurrent.Future;
 
 import io.confluent.ksql.KsqlEngine;
-import io.confluent.ksql.ddl.DdlConfig;
-import io.confluent.ksql.ddl.commands.DDLCommandResult;
+import io.confluent.ksql.ddl.commands.DdlCommandResult;
 import io.confluent.ksql.exception.ExceptionUtil;
 import io.confluent.ksql.parser.tree.CreateAsSelect;
 import io.confluent.ksql.parser.tree.CreateTableAsSelect;
-import io.confluent.ksql.parser.tree.DDLStatement;
+import io.confluent.ksql.parser.tree.DdlStatement;
 import io.confluent.ksql.parser.tree.Query;
 import io.confluent.ksql.parser.tree.QuerySpecification;
 import io.confluent.ksql.parser.tree.Relation;
@@ -105,7 +105,10 @@ public class StatementExecutor {
       Command command,
       CommandId commandId
   ) throws Exception {
-    handleStatementWithTerminatedQueries(command, commandId, null, false);
+    handleStatementWithTerminatedQueries(command,
+                                         commandId,
+                                         null,
+                                         false);
   }
 
   /**
@@ -220,14 +223,14 @@ public class StatementExecutor {
   ) throws Exception {
     String statementStr = command.getStatement();
 
-    DDLCommandResult result = null;
+    DdlCommandResult result = null;
     String successMessage = "";
-    if (statement instanceof DDLStatement) {
+    if (statement instanceof DdlStatement) {
       result =
           ksqlEngine.executeDdlStatement(
               statementStr,
-              (DDLStatement) statement,
-              command.getStreamsProperties()
+              (DdlStatement) statement,
+              command.getKsqlProperties()
           );
     } else if (statement instanceof CreateAsSelect) {
       successMessage = handleCreateAsSelect(
@@ -263,12 +266,13 @@ public class StatementExecutor {
   }
 
   private void handleRunScript(Command command) throws Exception {
-    if (command.getStreamsProperties().containsKey(DdlConfig.SCHEMA_FILE_CONTENT_PROPERTY)) {
+
+    if (command.getKsqlProperties().containsKey(KsqlConstants.RUN_SCRIPT_STATEMENTS_CONTENT)) {
       String queries =
-          (String) command.getStreamsProperties().get(DdlConfig.SCHEMA_FILE_CONTENT_PROPERTY);
+          (String) command.getKsqlProperties().get(KsqlConstants.RUN_SCRIPT_STATEMENTS_CONTENT);
       List<QueryMetadata> queryMetadataList = ksqlEngine.buildMultipleQueries(
           queries,
-          command.getStreamsProperties()
+          command.getKsqlProperties()
       );
       for (QueryMetadata queryMetadata : queryMetadataList) {
         if (queryMetadata instanceof PersistentQueryMetadata) {
@@ -279,6 +283,7 @@ public class StatementExecutor {
     } else {
       throw new KsqlException("No statements received for LOAD FROM FILE.");
     }
+
   }
 
   private String handleCreateAsSelect(
@@ -331,12 +336,12 @@ public class StatementExecutor {
 
     QueryMetadata queryMetadata = ksqlEngine.buildMultipleQueries(
         queryString,
-        command.getStreamsProperties()
+        command.getKsqlProperties()
     ).get(0);
 
     if (queryMetadata instanceof PersistentQueryMetadata) {
       PersistentQueryMetadata persistentQueryMetadata = (PersistentQueryMetadata) queryMetadata;
-      final QueryId queryId = persistentQueryMetadata.getId();
+      final QueryId queryId = persistentQueryMetadata.getQueryId();
 
       if (terminatedQueries != null && terminatedQueries.containsKey(queryId)) {
         CommandId terminateId = terminatedQueries.get(queryId);
@@ -370,7 +375,7 @@ public class StatementExecutor {
   private void terminateQuery(TerminateQuery terminateQuery) throws Exception {
 
     final QueryId queryId = terminateQuery.getQueryId();
-    final QueryMetadata queryMetadata = ksqlEngine.getPersistentQueries().get(queryId);
+    final QueryMetadata queryMetadata = ksqlEngine.getPersistentQuery(queryId);
     if (!ksqlEngine.terminateQuery(queryId, true)) {
       throw new Exception(String.format("No running query with id %s was found", queryId));
     }

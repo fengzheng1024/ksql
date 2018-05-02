@@ -106,11 +106,6 @@ public class QueuedSchemaKStream extends SchemaKStream {
   }
 
   @Override
-  public SchemaKStream select(Schema selectSchema) {
-    throw new UnsupportedOperationException();
-  }
-
-  @Override
   public SchemaKStream select(List<Pair<String, Expression>> expressions) {
     throw new UnsupportedOperationException();
   }
@@ -127,12 +122,14 @@ public class QueuedSchemaKStream extends SchemaKStream {
   }
 
   @Override
-  public SchemaKStream selectKey(Field newKeyField) {
+  public SchemaKStream selectKey(Field newKeyField, boolean updateRowKey) {
     throw new UnsupportedOperationException();
   }
 
   @Override
-  public SchemaKGroupedStream groupByKey(Serde keySerde, Serde valSerde) {
+  public SchemaKGroupedStream groupBy(
+      final Serde<String> keySerde, final Serde<GenericRow> valSerde,
+      final List<Expression> groupByExpressions) {
     throw new UnsupportedOperationException();
   }
 
